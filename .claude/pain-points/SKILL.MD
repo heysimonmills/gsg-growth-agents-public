@@ -1,5 +1,5 @@
 ---
-name: perplexity-pain-research
+name: pain-points
 description: >
   Use this skill whenever the user wants to research customer pain points, complaints,
   frustrations, or struggles around a product, service, or category — especially using
@@ -15,8 +15,8 @@ description: >
 # Perplexity Pain Point Research (Reddit-First)
 
 A skill for extracting real customer pain points and verbatim language from Reddit using
-the Perplexity API. Output is structured for direct use in ad copy, landing page copy,
-email, and creative strategy.
+the Perplexity API for discovery and Apify for live post/comment scraping. Output is
+structured for direct use in ad copy, landing page copy, email, and creative strategy.
 
 ---
 
@@ -26,9 +26,11 @@ The goal is not summarized insights — it's **raw, exact customer language** pu
 real Reddit threads. The output should feel like a swipe file a copywriter would kill for:
 real words, real frustration, real desire.
 
-**Primary source**: Reddit (via Perplexity `sonar` model with focused Reddit queries)  
-**Secondary source**: Perplexity web search (for broader VOC when Reddit is thin)  
-**Output**: Structured pain point report with copy-ready language
+**Phase 1 — Discovery**: Perplexity `sonar` model identifies the right subreddits,
+keywords, and thread types, and surfaces initial quotes.  
+**Phase 2 — Live Scraping**: Apify `trudax~reddit-scraper-lite` pulls raw posts and
+comments from the subreddits Perplexity identifies — unfiltered, sortable by upvotes.  
+**Output**: Structured pain point report with copy-ready language drawn from both sources.
 
 ---
 
@@ -56,7 +58,7 @@ emotional language and specific complaints. Use a mix of:
 ### Query Patterns (adapt to topic)
 
 | Intent | Query Template |
-|--------|---------------|
+|--------|----------------|
 | Core complaints | `site:reddit.com [topic] "hate" OR "frustrated" OR "annoying"` |
 | Consistency/habit failures | `site:reddit.com [topic] "stopped" OR "gave up" OR "don't bother"` |
 | Skepticism | `site:reddit.com [topic] "waste of money" OR "doesn't work" OR "scam"` |
@@ -64,7 +66,6 @@ emotional language and specific complaints. Use a mix of:
 | Positive framing (to find negatives) | `site:reddit.com [topic] "finally found" OR "only thing that worked"` — reveals what failed before |
 | Desired outcome | `site:reddit.com [topic] "wish" OR "if only" OR "would be perfect if"` |
 | Subreddit-specific | `subreddit:r/[relevant_sub] [topic] problems` |
-
 
 ---
 
@@ -83,7 +84,7 @@ curl -X POST https://api.perplexity.ai/chat/completions \
     "messages": [
       {
         "role": "system",
-        "content": "You are a research assistant. Your job is to find EXACT quotes and language that real people use on Reddit when discussing problems, frustrations, or complaints. Do not paraphrase. Return direct quotes with thread context (subreddit, approximate upvotes if available). Prioritize emotionally charged language, vivid descriptions of pain, and specific phrases people use to describe their problems."
+        "content": "You are a research assistant. Your job is to find EXACT quotes and language that real people use on Reddit when discussing problems, frustrations, or complaints. Do not paraphrase. Return direct quotes with thread context (subreddit, approximate upvotes if available). Prioritize emotionally charged language, vivid descriptions of pain, and specific phrases people use to describe their problems. At the end of each response, list the subreddit names you found most relevant as a JSON array like: {\"subreddits\": [\"supplement\", \"Nootropics\", \"xxfitness\"]}"
       },
       {
         "role": "user",
@@ -102,17 +103,87 @@ curl -X POST https://api.perplexity.ai/chat/completions \
 - `return_citations`: `true` — keeps sources traceable
 - `search_recency_filter`: `"month"` for trending issues; `"year"` for broader coverage
 
-Run all 5–8 queries. Save raw outputs before synthesizing.
+**After all queries run:**
+- Collect all raw quotes and initial insights from Perplexity
+- Compile the unique subreddits mentioned across all responses into a deduplicated list
+- This list becomes the input for Step 3.5
+
+---
+
+## Step 3.5: Pull Live Reddit Data via Apify
+
+Using the subreddits identified by Perplexity in Step 3, run the Apify Reddit Scraper
+Lite to pull raw posts and comments directly. This gives unfiltered, live data that
+Perplexity may have missed or summarized.
+
+### For each subreddit identified (up to 5 most relevant):
+
+**Step A — Start the scraper run**
+
+```bash
+curl -X POST "https://api.apify.com/v2/acts/trudax~reddit-scraper-lite/runs?token=$APIFY_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "startUrls": [
+      { "url": "https://www.reddit.com/r/[SUBREDDIT]/search/?q=[KEYWORD]&sort=top&t=year" }
+    ],
+    "maxItems": 100,
+    "proxy": { "useApifyProxy": true }
+  }'
+```
+
+Replace `[SUBREDDIT]` with each subreddit from Step 3 and `[KEYWORD]` with the core
+research topic (URL-encoded). Use `sort=top&t=year` to surface highest-signal posts.
+
+Save the `defaultDatasetId` value from the response JSON — you'll need it in the next call.
+
+**Step B — Wait, then fetch results**
+
+Wait 20–30 seconds for the run to complete, then:
+
+```bash
+curl "https://api.apify.com/v2/datasets/[defaultDatasetId]/items?token=$APIFY_API_TOKEN"
+```
+
+**Step C — Extract the right fields**
+
+From each result item, extract:
+
+| Field | What it contains | Priority |
+|-------|-----------------|----------|
+| `title` | Post headline | High — good for hook angles |
+| `text` or `body` | Post body text | High — rich pain language |
+| `score` | Upvote count | Use as signal strength filter |
+| `comments` | Array of comment objects | Highest — most verbatim language lives here |
+| `url` | Thread permalink | Keep for source attribution |
+
+**Comment extraction logic:**
+- For each post, iterate through `comments` array
+- Extract `comment.text` (or `comment.body`) and `comment.score`
+- Flag comments with `score > 20` as ⭐ copy-worthy candidates
+- Skip: AutoModerator, deleted/removed content, mod posts, bots
+
+**Priority filter:**
+- Posts with `score > 50` — surface first
+- Comments with `score > 20` — surface first
+- Discard items with no text content
+
+### Subreddit loop
+
+Run Steps A–C for each subreddit. You do not need to wait for all runs to finish before
+starting the next — start them sequentially and collect all `defaultDatasetId` values,
+then fetch results in a second pass.
+
+Label all extracted content with its source: `[Apify — r/subreddit]`
 
 ---
 
 ## Step 4: Extract and Categorize Pain Points
 
-After collecting raw results, process them into structured categories.
+Combine all content from Perplexity (Step 3) and Apify (Step 3.5) and organize into
+structured categories. Label each quote's source.
 
 ### Pain Point Categories
-
-Organize findings into these buckets (use only what applies):
 
 **1. Functional Failures**
 > Things that literally don't work as expected  
@@ -152,7 +223,7 @@ Format each quote as:
 
 ```
 "[Exact quote]"
-— r/[subreddit], [approximate context]
+— r/[subreddit] · [source: Perplexity or Apify] · score: [upvotes if available]
 ```
 
 Flag especially copy-worthy phrases with ⭐
@@ -175,8 +246,9 @@ Deliver a structured report with these sections:
 ### RESEARCH REPORT: [Topic] — Reddit Pain Point Analysis
 
 **Research Date**: [date]  
-**Queries Run**: [n]  
-**Sources**: Reddit (via Perplexity)
+**Perplexity Queries Run**: [n]  
+**Subreddits Scraped via Apify**: [list]  
+**Total Quotes Collected**: [n]
 
 ---
 
@@ -195,12 +267,12 @@ Deliver a structured report with these sections:
 *Direct quotes organized by theme — use these verbatim or near-verbatim*
 
 **[Category 1: e.g., Habit Failure]**
-- ⭐ "quote" — r/subreddit
-- "quote" — r/subreddit
+- ⭐ "quote" — r/subreddit [Apify · score: 847]
+- "quote" — r/subreddit [Perplexity]
 
 **[Category 2: e.g., Skepticism]**
-- "quote" — r/subreddit
-- ⭐ "quote" — r/subreddit
+- "quote" — r/subreddit [Apify · score: 312]
+- ⭐ "quote" — r/subreddit [Perplexity]
 
 *(continue per category)*
 
@@ -223,7 +295,7 @@ Deliver a structured report with these sections:
 #### 📎 Source Threads
 *Notable Reddit threads found — for deeper reading*
 
-- [Thread title / URL if available]
+- [Thread title / URL]
 
 ---
 
@@ -241,20 +313,25 @@ Label these clearly as "non-Reddit sources" in the output.
 
 ## Quality Checks Before Delivering
 
-- [ ] At least 15–20 distinct verbatim quotes collected
+- [ ] At least 15–20 distinct verbatim quotes collected (combined Perplexity + Apify)
+- [ ] At least 5 quotes sourced directly from Apify live scrape (highest signal)
 - [ ] At least 3 pain point categories populated
-- [ ] Copy angles are specific, not generic ("collagen that you'll actually take" not "convenient supplement")
+- [ ] Apify quotes are filtered by score — no low-signal noise
+- [ ] Copy angles are specific, not generic
 - [ ] Quotes are real-sounding, not AI-paraphrased
 - [ ] Top 5 insights section is punchy and immediately usable
-- [ ] Citations/sources noted for at least the best quotes
+- [ ] All quotes labeled with source (Perplexity vs Apify) and subreddit
 
 ---
 
 ## Notes for Claude Code
 
-- The Perplexity API key is available as `$PERPLEXITY_API_KEY` in the environment
-- Default to `sonar` model; use `sonar-pro` if the user wants deeper/longer results
-- Run queries sequentially if parallel execution causes rate limit issues
-- If a query returns no Reddit results, widen it (remove `site:reddit.com`, add broader terms)
-- The user may want to iterate — offer to run additional queries on sub-themes that emerge
+- `$PERPLEXITY_API_KEY` and `$APIFY_API_TOKEN` are available in the environment
+- Default Perplexity model: `sonar`; use `sonar-pro` if the user wants deeper results
+- Run Perplexity queries sequentially if parallel execution causes rate limit issues
+- Apify runs are async — start all runs first, collect dataset IDs, then fetch results
+- If the Apify run hasn't completed after 30s, retry the fetch after another 15s
+- If a subreddit returns < 10 results, widen the keyword or try a related subreddit
+- The actor field names may be `text`, `body`, or `selftext` depending on post type — check the first result and adapt
+- If a query returns no Reddit results from Perplexity, widen it (remove `site:reddit.com`, add broader terms)
 - Final output can be written to a `.md` file for easy sharing or import into Notion
