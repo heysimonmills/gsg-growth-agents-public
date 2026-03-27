@@ -4,8 +4,8 @@
       "command": "npx",
       "args": ["-y", "@shopify/dev-mcp@latest"],
       "env": {
-        "SHOPIFY_ACCESS_TOKEN": "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",
-        "SHOPIFY_STORE_URL": "the-good-jelly-co.myshopify.com"
+        "SHOPIFY_ACCESS_TOKEN": "YOUR_SHOPIFY_ACCESS_TOKEN",
+        "SHOPIFY_STORE_URL": "your-store.myshopify.com"
       }
     }
   }

@@ -2,3 +2,9 @@
 __pycache__/
 .env
 google-ads.yaml
+.mcp.json
+output/
+*.xlsx
+*.pdf
+*.mp4
+*.docx
